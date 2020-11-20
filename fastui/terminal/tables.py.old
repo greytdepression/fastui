@@ -1,0 +1,284 @@
+from os import argv, get_terminal_size
+import os
+from tabulate import tabulate
+import numpy as np
+from math import ceil
+
+# TODO - finish this
+class SimplePlainTable:
+    class Column:
+        LEFT_ALIGN = 0
+        CENTER_ALIGN = 1
+        RIGHT_ALIGN = 2
+
+        TOP_ALIGN = 0
+        MIDDLE_ALIGN = 1
+        BOTTOM_ALIGN = 2
+
+        FIT_X_SPACE = 0
+        FILL_X_SPACE = 1
+
+        def __init__(self, h_align=0, v_align=0, x_space=0, \
+            min_width=10):
+            self.h_align = h_align
+            self.v_align = v_align
+            self.x_space = x_space
+            self.min_width = min_width
+
+
+    def __init__(self, col_separation=2, multi_line_row_indent=2, \
+        keep_height_through_line_break=True):
+        self._col_data = []
+        self._data = [[]]
+        self.col_separation = col_separation
+        self.multi_line_row_indent = multi_line_row_indent
+        self.keep_height_through_line_break = keep_height_through_line_break
+
+    def add_column(self, column):
+        atype(column, self.Column)
+        self._col_data.append(column)
+        temp = self._data.copy()
+        self._data = [[None for c in self._col_data] for _ in \
+            range(len(temp))]
+
+        if len(temp) > 0:
+            for i in range(len(temp)):
+                for j in range(len(temp[0])):
+                    self._data[i][j] = temp[i][j]
+
+        temp.clear()
+
+    def add_column(self):
+        self.add_column(self.Column())
+
+    def add_row(self, *entires):
+        for e in entries: atype(e, str)
+        assert len(entries) <= len(self._col_data)
+
+        self._data.append([(entries[i] if i < len(entries) else '') \
+            for i in range(len(self._col_data))])
+
+    def __get_column_width__(self, index):
+        assert 0 <= index < len(self._col_data)
+
+        max_width = 0
+        for i in range(len(self._data)):
+            max_width = max(max_width, len(self._data[i][index]))
+
+        return max_width
+
+    def __distribute_columns__(self, width):
+        sep = self.col_separation
+
+        row_rep = []
+
+        min_width = 0
+        indent = 0
+        separation = 0
+        fitted_width = 0
+        cur_line = []
+        min_widths = []
+        fitted_widths = []
+
+        #for k, col in enumerate(self._col_data):
+        k = 0
+        while k < len(self._col_data):
+            col = self._col_data[k]
+
+            width = 0
+            if col.x_space == self.Column.FIT_X_SPACE:
+                width = self.__get_column_width__()
+            elif col.x_space == self.Column.FILL_X_SPACE:
+                width = col.min_width
+
+            # There is still enough space in this line
+            if width + min_width + indent + sep * len(cur_line) <= width:
+                cur_line.append(k)
+                min_width += width
+
+                if col.x_space == self.Column.FIT_X_SPACE:
+                    fitted_width += width
+                    fitted_widths.append(width)
+                    min_widths.append(0)
+                else:
+                    min_widths.append(width)
+                    fitted_widths.append(0)
+
+                k += 1
+
+            # There is not enough space in this line
+            else:
+                # There are already some columns in this line so do not add this one
+                if len(cur_line) > 0:
+                    # Make the min widths into a numpy array
+                    min_widths = np.array(min_widths)
+
+                    # Calculate the available space
+                    free_width = width - fitted_width - sep * (len(cur_line) - 1) - indent
+                    
+                    # How much can the flexible cells be expanded
+                    factor = free_width / np.sum(min_widths)
+
+                    # Make those cells as big as possible but relative to their minimum sizes
+                    widths = factor * min_widths
+
+                    # Make sure the total sum does not exceed the line width
+                    widths[widths == np.max(widths)] += free_width - np.sum(widths)
+
+                    widths += np.array(fitted_widths)
+
+                    # Assign the space to the cells
+                    x = indent
+                    line_coords = []
+                    for j in cur_line:
+                        i = j - k
+                        line_coords.append((x, widths[i]))
+                        x += widths[i] + sep
+
+                    # Append line
+                    row_rep.append(line_coords)
+
+                    # Notice that we have not dealt with the kth column yet, so k stays the same
+                
+                # No columns in this line yet and still not enough space :(
+                else:
+                    # Check whether there is space for indents
+                    if width - indent > 5:
+                        row_rep.append([(indent, width-indent)]
+                    else:
+                        row_rep.append([(0, width)])
+
+                    # Insert a line break
+                    row.append([])
+
+                    # Increase k
+                    k += 1
+
+        return np.array(row_rep)
+
+    def __split_entry__(self, text, width, h_align, word_wrap=True):
+
+        # If word wrap is off, just return the text in one line
+        if not word_wrap:
+            if len(text) > width:
+                return [text[:width]]
+            else:
+                if h_align == self.Column.RIGHT_ALIGN:
+                    return [text.rjust(width)]
+                elif h_align == self.Column.CENTER_ALIGN:
+                    space = width - len(text)
+
+                    line = text.rjust(len(text) + int(space / 2))
+
+                    return [line.ljust(width)]
+
+                return [text.ljust(width)]
+
+
+        words = text.split(' ')
+        lines = []
+
+        k = 0
+        line_start = 0
+        while k < len(words):
+            if len(' '.join(words[line_start:k+1])) > width:
+                # This line should only contain words[line_start:k]
+
+                # Check whether there are actually words in this line. If not,
+                # split the first word to fit
+                if k == line_start:
+                    lines.append(words[k][:width])
+                    words[k] = words[k][width:]
+
+                    # Fix this index for the next iteration
+                    k -= 1
+                else:
+                    line = ' '.join(words[line_start:k])
+
+                    if h_align == self.Column.CENTER_ALIGN:
+                        space = width - len(line)
+                        line = line.rjust(len(line) + int(space / 2))
+                    elif h_align == self.Column.RIGHT_ALIGN:
+                        line = line.rjust(width)
+
+                    lines.append(line.ljust(width))
+
+            k += 1
+
+        return lines
+
+    def __fit_entries_vertically__(self, entry_lines, num_lines, v_align):
+
+        # All the lines must already have the same width
+        assert min(map(len, entry_lines)) == max(map(len, entry_lines))
+        assert len(entry_lines) <= num_lines
+
+        width = len(entry_lines[0])
+
+        if len(entry_lines) == num_lines:
+            return entry_lines
+
+        filler = ''.ljust(width)
+        delta = num_lines - len(entry_lines)
+
+        # Add filler
+        if v_align == self.Column.BOTTOM_ALIGN:
+            for i in range(delta):
+                entry_lines.insert(0, filler)
+        elif v_align == self.Column.MIDDLE_ALIGN:
+            for i in range(int(delta / 2)):
+                entry_lines.insert(0, filler)
+
+        delta = num_lines - len(entry_lines)
+        for i in range(delta):
+            entry_lines.append(filler)
+
+        return entry_lines
+
+    def __row_to_string__(self, index, row_representation, width):
+
+        # Widths of the columns
+        widths = row_representation[:,:,1].astype(np.float32)
+        starts = row_representation[:,:,0]
+        ends = (starts + widths).astype(np.int32)
+
+        # Entries split into lines
+        split_entry = lambda k, e: self.__split_entry__(e, widths[k], \
+            self._col_data[k].h_align)
+        entry_lines = list(map(split_entry, enumerate(self._data)))
+        num_lines = max(map(len, entry_lines))
+
+        output_lines = []
+
+        k = 0
+        for rep in row_representation:
+            num_entries = len(rep)
+
+            if not self.keep_height_through_line_break:
+                num_lines = max(list(map(len, entry_lines))[k:k+num_entries])
+
+            data = []
+
+            for i in range(k, k + num_entries):
+                data.append(self.__fit_entries_vertically__(entry_lines[i], \
+                    num_lines, self._col_data[i].v_align))
+
+            for l in range(num_lines):
+                line = ''.ljust(rep[0][0]) # Add indentation
+                for i in range(num_entries):
+                    line += data[i][l]
+
+                    if i < num_entries - 1:
+                        line = line.ljust(starts[k + i] - 1)
+
+                output_lines.append(line.ljust(width))
+
+            k += num_entries
+
+        return output_lines
+
+    def __str__(self):
+        width, height = os.get_terminal_size()
+        row_rep = self.__distribute_columns__(width)
+
+        output_lines = []
