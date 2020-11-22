@@ -8,3 +8,6 @@ fastui/tests/__pycache__/
 
 # Ignore templates folder for now
 templates/
+
+# Ignore outdated files
+*.old
