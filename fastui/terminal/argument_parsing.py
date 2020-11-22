@@ -5,50 +5,12 @@ from tabulate import tabulate
 import numpy as np
 from math import ceil
 from .styled_output import StyledOutput
-from typing import Union, List, Iterable, Any
+from typing import Union, List, Iterable, Any, Iterator, Optional, Callable
 from rich.console import Console
 from .tables import SimplePlainTable
+from .._utils import assert_type, assert_func, assert_iter, \
+    assert_iter_types, from_dict
 
-
-def atype(arg, typ):
-    return type(arg) == typ
-
-def atype_or_none(arg, typ):
-    return type(arg) == typ or arg is None
-
-def afunc(arg):
-    return callable(arg)
-
-def alisttype(lst, typ):
-    b = type(lst) in (list, tuple)
-
-    for e in lst:
-        b &= type(e) == typ
-
-    return b
-
-def alisttypes(lst, typs, allow_none=False):
-    b = type(lst) in (list, tuple)
-    b &= type(typs) in (list, tuple)
-
-    if not b: return False
-
-    for e in lst:
-        b &= (type(e) in typs) or (e is None and allow_none)
-
-    return b
-
-def from_dict(dic, key, default):
-    if key in dic:
-        return dic[key]
-
-    return default
-
-def print_indented(indent, *args):
-    if indent == 0:
-        print(*args)
-    else:
-        print(''.rjust(indent - 1, ' '), *args)
 
 def parse_list_from_string(string, delims, typ):
     if delims[0] not in string:
@@ -68,12 +30,18 @@ def parse_list_from_string(string, delims, typ):
 
     return _list
 
-def parse_list(args, delims, typ):
-    assert type(delims) in (list, tuple)
+def parse_list(itr, delims, typ):
+    assert_iter(delims, name='delims', min_len=2, options=False)
 
-    if type(delims[0]) in (list, tuple):
-        assert all(len(d) == 2 for d in delims)
-        assert all(type(d[0]) == type(d[1]) == str for d in delims)
+    args = []
+    args.append(next(itr))
+
+    # if type(delims[0]) in (list, tuple):
+    if assert_iter(delims[0], 'delims[0]', stop=False):
+        assert all(len(d) == 2 for d in delims), \
+            'List delimiters must be given in pairs.'
+        assert all(type(d[0]) == type(d[1]) == str for d in delims), \
+            'List delimiters must be strings.'
 
         starts = [d[0] for d in delims]
 
@@ -85,28 +53,27 @@ def parse_list(args, delims, typ):
 
         delims = delims[k]
 
-    assert len(delims) == 2
+    assert len(delims) == 2, \
+        'List delimiters must be given in pairs.'
 
     # Check whether there are parantheses
-    assert any(b in args[0] for b in delims)
+    assert any(b in args[0] for b in delims), \
+        'Opening list delimiter must be present in first relevant argument.'
 
     # Check which argument is contains the closing paranthesis
     counter = args[0].count(delims[0])
     counter -= args[0].count(delims[1])
 
-    end = 0
     while counter > 0:
-        end += 1
-        assert end < len(args)
+        args.append(next(itr))
 
-        counter += args[end].count(delims[0])
-        counter -= args[end].count(delims[1])
-    end += 1
+        counter += args[-1].count(delims[0])
+        counter -= args[-1].count(delims[1])
 
     # Build the list
-    string = ''.join(args[:end])
+    string = ''.join(args)
 
-    return parse_list_from_string(string, delims, typ), end
+    return parse_list_from_string(string, delims, typ)
 
 
 class Command:
@@ -114,23 +81,24 @@ class Command:
     def __init__(
         self, 
         names: Iterable[str], 
+        arg_parser: 'ArgumentParser',
         help_text: Optional[str] = None, 
         usage: Optional[str] = None, 
-        commands: Optional[Iterable[Command]] = None,
-        parameters: Optional[Iterable[Parameter]] = None, 
-        options: Optional[Iterable[Option]] = None, 
-        callback: Optional[Callable[[],]] = None,
-        arg_parser: ArgumentParser
+        commands: Optional[Iterable['Command']] = None,
+        parameters: Optional[Iterable['Parameter']] = None, 
+        options: Optional[Iterable['Option']] = None, 
+        callback: Optional[Callable[...,None]] = None,
+        std_help: bool = True
     ) -> None:
-
-        assert alisttype(names, str) and len(names) >= 1
-        assert atype_or_none(help_text, str)
-        assert atype_or_none(usage, str)
-        assert alisttype(commands, Command) or commands is None
-        assert alisttype(parameters, Command.Parameter) or parameters is None
-        assert alisttype(options, Command.Option) or options is None
-        assert afunc(callback) or callback is None
-        assert atype(arg_parser, ArgumentParser)
+        assert_iter_types(names, str, name='names', min_len=1)
+        assert_type(help_text, str, name='help_text', optional=True)
+        assert_type(usage, str, name='usage', optional=True)
+        assert_iter_types(commands, self.__class__, name='commands', allow_none=True)
+        assert_iter_types(parameters, self.__class__.Parameter, name='parameters', allow_none=True)
+        assert_iter_types(options, self.__class__.Option, name='options', allow_none=True)
+        assert_func(callback, name='callback', optional=True)
+        assert_type(arg_parser, ArgumentParser, name='arg_parser', optional=False)
+        assert_type(std_help, bool, name='std_help', optional=False)
 
         self._names = names
         self.help_text = help_text if help_text is not None else ''
@@ -139,6 +107,7 @@ class Command:
         self._parameters = parameters if parameters is not None else []
         self._callback = callback if callback is not None else lambda *args, **kwargs: None
         self._arg_parser = arg_parser
+        self._std_help = std_help
 
         self._command_list = commands if commands is not None else []
         self._command_order = list(range(len(self._command_list)))
@@ -162,26 +131,29 @@ class Command:
     def __init__(
         self,
         names: Iterable[str], 
+        arg_parser: 'ArgumentParser',
         help_text: Optional[str] = None, 
         usage: Optional[str] = None, 
-        commands: Optional[Iterable[Command]] = None,
-        parameter_interpreters: Optional[Iterable[Callable]], 
-        parameter_descriptors: Optional[Iterable[str]],
-        options: Optional[Iterable[Option]] = None, 
-        callback: Optional[Callable[[],]] = None,
-        arg_parser: ArgumentParser
+        commands: Optional[Iterable['Command']] = None,
+        parameter_interpreters: Iterable[Callable[[Iterator],Iterable]] = tuple(), 
+        parameter_descriptors: Iterable[str] = tuple(),
+        options: Optional[Iterable['Option']] = None, 
+        callback: Optional[Callable[...,None]] = None,
+        std_help: bool = True
     ) -> None:
         self.__init__(
-            names, 
-            help_text, 
-            usage, 
-            commands,
-            Command.Parameter(
+            names=names, 
+            arg_parser=arg_parser,
+            help_text=help_text, 
+            usage=usage, 
+            commands=commands,
+            parameters=Command.Parameter(
                 list(parameter_interpreters),
                 list(parameter_descriptors)
             ),
-            options, 
-            callback
+            options=options, 
+            callback=callback,
+            std_help=std_help
         )
 
     @property
@@ -236,21 +208,26 @@ class Command:
         # Call the callback function
         self._callback(**self._option_shortcuts)
 
-    def command(self, name: str) -> 'Command':
-        assert name in self._command_keys
+    def command(self, key: str) -> 'Command':
+        assert key in self._command_keys, \
+            'Command key must exist.'
 
         return self._command_list[self._command_keys[name]]
 
-    def option(self, name: str) -> 'Option':
-        assert name in self._option_keys
+    def option(self, key: str) -> 'Option':
+        assert key in self._option_keys, \
+            'Option key must exist.'
 
         return self._option_list[self._option_keys[name]]
 
-    def add_command(self, command, index=None):
-
+    def add_command(
+        self, 
+        command: 'Command', 
+        index: Optional[int] = None
+    ) -> None:
         # Check commands are of the correct type
-        atype(command, self.Command)
-        atype_or_none(index, int)
+        assert_type(command, self.Command, name='command', optional=False)
+        assert_type(index, int, name='index', optional=True)
 
         # Add command to the list
         command_index = len(self._command_list)
@@ -270,35 +247,41 @@ class Command:
         names: Iterable[str], 
         help_text: Optional[str] = None, 
         usage: Optional[str] = None, 
-        commands: Optional[Iterable[Command]] = None,
-        parameter_interpreters: Optional[Iterable[Callable]], 
-        parameter_descriptors: Optional[Iterable[str]],
-        options: Optional[Iterable[Option]] = None, 
-        callback: Optional[Callable[[],]] = None,
+        commands: Optional[Iterable['Command']] = None,
+        parameter_interpreters: Iterable[Callable[[Iterator],Iterable]] = tuple(), 
+        parameter_descriptors: Iterable[str] = tuple(),
+        options: Optional[Iterable['Option']] = None, 
+        callback: Optional[Callable[...,None]] = None,
         index: Optional[int] = None
     ) -> None:
         cmd = Command(
-            names,
-            help_text,
-            usage,
-            commands,
-            parameter_interpreters,
-            parameter_descriptors,
-            options,
-            callback,
-            self._arg_parser
+            names=names,
+            arg_parser=self._arg_parser,
+            help_text=help_text,
+            usage=usage,
+            commands=commands,
+            parameter_interpreters=parameter_interpreters,
+            parameter_descriptors=parameter_descriptors,
+            options=options,
+            callback=callback,
+            std_help=self._std_help
         )
 
         self.add_command(cmd, index)
 
-    def add_option(self, option, index=None):
+    def add_option(
+        self, 
+        option: 'Option', 
+        index: Optional[int] = None
+    ) -> None:
 
         # Check options are of the correct type
-        atype(option, self.Option)
-        atype_or_none(index, int)
+        assert_type(option, self.Option, name='option', optional=False)
+        assert_type(index, int, name='index', optional=True)
 
         # Option key must not have been chosen yet!
-        assert option.key not in self._option_data
+        assert option.key not in self._option_data, \
+            f'The key `{option.key}` is already in use. Option keys must be unique.'
 
         # Add option to the list
         option_index = len(self._option_list)
@@ -319,16 +302,31 @@ class Command:
 
     def add_option(
         self,
-
+        key: str, 
+        help_text: Optional[str], 
+        shortcuts: Iterable[str],
+        parameter_interpreters: Iterable[Callable[[Iterator], Iterable]],
+        parameter_descriptors: Iterable[str], 
+        callback: Callable[..., None],
+        index: Optional[int] = None
     ) -> None:
-        pass
+        opt = self.Option(
+            key=key, 
+            help_text=help_text, 
+            shortcuts=shortcuts, 
+            parameter_interpreters=parameter_interpreters, 
+            parameter_descriptors=parameter_descriptors,
+            callback=callback
+        )
 
-    def __help_option__(self):
-        def output(self):
+        self.add_option(opt, index)
+
+    def __help_option__(self) -> None:
+        def output(slf):
             # Usage section
-            if self.usage is not None:
-                con.print(self.style.header('usage'))
-                con.print(self.style.indent(self.usage))
+            if slf.usage is not None:
+                con.print(slf.style.header('usage'))
+                con.print(slf.style.indent(slf.usage))
 
 
             sections = []
@@ -336,15 +334,15 @@ class Command:
             # Commands section
             command_table = []
 
-            for k in self._command_order:
-                cmd = self._command_list[k]
-                lhs = ' '.join([self.style.list(cmd.names_str),
-                    self.style.parameters(cmd.parameter_descriptors)])
+            for k in slf._command_order:
+                cmd = slf._command_list[k]
+                lhs = ' '.join([slf.style.list(cmd.names_str),
+                    slf.style.parameters(cmd.parameter_descriptors)])
                 command_table.append([lhs, cmd.help_text])
 
             if len(command_table) > 0:
                 cmd_sec = SimplePlainTable.Section(
-                    self.style.header('commands'),
+                    slf.style.header('commands'),
                     command_table
                 )
                 sections.append(cmd_sec)
@@ -352,149 +350,167 @@ class Command:
             # Options section
             options_table = []
 
-            for k in self._option_order:
-                opt = self._option_list[k]
-                lhs = ' '.join([self.style.list(opt.shortcuts_str), \
-                    self.style.parameters(opt.parameter_descriptors)])
+            for k in slf._option_order:
+                opt = slf._option_list[k]
+                lhs = ' '.join(
+                    (
+                        slf.style.list(opt.shortcuts_str), 
+                        slf.style.parameters(opt.parameter_descriptors)
+                    )
+                )
                 options_table.append([lhs, opt.help_text])
 
             if len(options_table) > 0:
                 cmd_sec = SimplePlainTable.Section(
-                    self.style.header('options'),
+                    slf.style.header('options'),
                     options_table
                 )
                 sections.append(cmd_sec)
 
             table = SimplePlainTable(
                 *sections, 
-                indentation=self._arg_parser.style.std_indent,
-                highlight_rows=self._arg_parser.style.table_alternate_rows,
-                header_style=self._arg_parser.style.header
+                indentation=slf._arg_parser.style.std_indent,
+                highlight_rows=slf._arg_parser.style.table_alternate_rows,
+                header_style=slf._arg_parser.style.header,
+                console=slf._arg_parser.console
             )
             table.print()
 
-        callback = lambda *args, **kwargs: output(self)
-        help_option = self.Option(
-            'help', 
-            'Show help.', 
-            ['h', 'help'], [], [], callback
+        _callback = lambda *args, **kwargs: output(self)
+        self.add_option(
+            key = 'help', 
+            help_text = 'Show help.', 
+            shortcuts = ['h', 'help'], 
+            parameter_interpreters = tuple(), 
+            parameter_descriptors = tuple(), 
+            callback = _callback,
+            index = 0
         )
-
-        self.add_option(help_option)
-
-    def add_version_option(
-        self, 
-        name: str, 
-        version: str,
-        text: str = '{name} - version {version}', 
-        index: int =1
-    ):
-        atype(name, str)
-        atype(version, str)
-        atype(text, str)
-        atype_or_none(index, int)
-
-        opt = self.Option(
-            'version', 
-            'V', 'version',
-            lambda *args, **kwargs: print(text.format(name=name, version=version))
-        )
-
-        self.add_option(opt, index)
 
     def add_simple_option(
         self, 
-        name: str, 
+        key: str, 
+        help_text: Optional[str],
         *shortcuts: str, 
-        callback: Callable, 
-        help_text: str
-    ):
-        opt = Command.Option(
-            name, 
-            help_text, 
-            shortcuts, 
-            [], 
-            [],
-            callback
+        callback: Callable[..., None],
+        index: Optional[int] = None
+    ) -> None:
+        self.add_option(
+            key = key, 
+            help_text = help_text, 
+            shortcuts = shortcuts, 
+            parameter_interpreters = tuple(), 
+            parameter_descriptors = tuple(), 
+            callback = callback,
+            index = index
         )
-        self.add_option(opt)
 
     def add_int_option(
         self, 
-        name: str, 
+        key: str, 
+        help_text: Optional[str],
         *shortcuts: str, 
-        callback: Callable, 
         parameter_descriptor: str,
-        help_text: str
-    ):
-        opt = Command.Option(
-            name, 
-            help_text, 
-            shortcuts,
-            [lambda args: int(args[0].strip()), 1],
-            [parameter_descriptor], 
-            callback
+        callback: Callable[..., None], 
+        index: Optional[int] = None
+    ) -> None:
+        self.add_option(
+            key = key, 
+            help_text = help_text, 
+            shortcuts = shortcuts, 
+            parameter_interpreters = (lambda itr: int(next(itr)),), 
+            parameter_descriptors = (parameter_descriptor,), 
+            callback = callback,
+            index = index
         )
-        self.add_option(opt)
 
     def add_float_option(
         self, 
-        name: str, 
-        *shortcuts: str,
-        callback: Callable,
+        key: str, 
+        help_text: Optional[str],
+        *shortcuts: str, 
         parameter_descriptor: str,
-        help_text: str
-    ):
-        opt = Command.Option(
-            name, 
-            help_text, 
-            shortcuts,
-            [lambda args: float(args[0].strip()), 1],
-            [parameter_descriptor], 
-            callback
+        callback: Callable[..., None], 
+        index: Optional[int] = None
+    ) -> None:
+        self.add_option(
+            key = key, 
+            help_text = help_text, 
+            shortcuts = shortcuts, 
+            parameter_interpreters = (lambda itr: float(next(itr)),), 
+            parameter_descriptors = (parameter_descriptor,), 
+            callback = callback,
+            index = index
         )
-        self.add_option(opt)
 
     def add_string_option(
         self, 
-        name: str, 
+        key: str, 
+        help_text: Optional[str],
         *shortcuts: str, 
-        callback: Callable, 
         parameter_descriptor: str,
-        help_text: str
-    ):
-        opt = Command.Option(
-            name, 
-            help_text, 
-            shortcuts,
-            [lambda args: args[0].strip(), 1],
-            [parameter_descriptor], 
-            callback
+        callback: Callable[..., None], 
+        index: Optional[int] = None
+    ) -> None:
+        self.add_option(
+            key=key,
+            help_text=help_text,
+            shortcuts=shortcuts,
+            parameter_interpreters=(
+                lambda itr: next(itr),
+            ),
+            parameter_descriptors=(parameter_descriptor,),
+            callback=callback,
+            index=index
         )
-        self.add_option(opt)
 
     def add_list_option(
         self, 
-        name: str, 
+        key: str, 
+        help_text: Optional[str],
         *shortcuts: str, 
-        element_parser: Callable[[List[str]], Any],
-        callback: Callable, 
-        parameter_descriptor: str, 
-        help_text: str
-    ):
-        opt = Command.Option(
-            name, 
-            help_text, 
-            shortcuts,
-            [lambda args: parse_list(args, element_parser)],
-            [parameter_descriptor], 
-            callback
+        list_delimiters: Optional[Iterable[Union[str, Iterable[str]]]],
+        element_parser: Callable[[str], Any],
+        parameter_descriptor: str,
+        callback: Callable[..., None], 
+        index: Optional[int] = None
+    ) -> None:
+        if list_delimiters is None:
+            list_delimiters = (('[', ']'), ('(', ')'), ('{', '}'))
+        self.add_option(
+            key=key,
+            help_text=help_text,
+            shortcuts=shortcuts,
+            parameter_interpreters=(
+                lambda itr: parse_list(itr, list_delimiters, element_parser),
+            ),
+            parameter_descriptors=(parameter_descriptor,),
+            callback=callback,
+            index=index
         )
-        self.add_option(opt)
 
-    def add_selection_option(self, name, shortcuts, valid_parameters, \
-        parameter_descriptors, callback, help_text):
-        
+    def add_selection_option(
+        self, 
+        key: str, 
+        help_text: Optional[str],
+        *shortcuts: str, 
+        valid_parameters: Iterable[str],
+        parameter_descriptors: Iterable[str],
+        callback: Callable[..., None], 
+        index: Optional[int] = None
+    ) -> None:
+        valid_parameters = tuple(map(str, valid_parameters))
+        self.add_option(
+            key=key,
+            help_text=help_text,
+            shortcuts=shortcuts,
+            parameter_interpreters=(
+                lambda itr: valid_parameters.index(next(itr)),
+            ),
+            parameter_descriptors=parameter_descriptors,
+            callback=callback,
+            index=index
+        )        
 
 
     class Option:
@@ -503,43 +519,37 @@ class Command:
             key: str, 
             help_text: Optional[str], 
             shortcuts: Iterable[str],
-            parameters: Iterable[Command.Parameter], 
-            callback: Callable
+            parameters: Iterable['Parameter'], 
+            callback: Callable[..., None]
         ) -> None:
-            atype(key, str)
-            atype_or_none(help_text, str)
-            atype(shortcuts, list)
-            alisttype(parameters, Command.Parameter)
-            afunc(callback)
-            # atype(command, Command)
+            assert_type(key, str, name='key', optional=False)
+            assert_type(help_text, str, name='help_text', optional=True)
+            assert_iter_types(shortcuts, str, name='shortcuts', min_len=1)
+            assert_iter_types(parameters, self.__class__.Parameter, name='parameters')
+            assert_func(callback, name='callback')
 
             self.key = key
             self.help_text = help_text
             self._shortcuts = shortcuts
-            self._parameters = \
-                Command.Parameter(parameter_interpreters, \
-                    parameter_descriptors)
+            self._parameters = self.__class__.Parameter(
+                parameter_interpreters, parameter_descriptors
+            )
             self._callback = callback
-            # self._command = command
-
-            # assert key not in self._command._option_data
-
-            # self._command._option_data[key] = None
 
         def __init__(
             self, 
             key: str, 
             help_text: Optional[str], 
             shortcuts: Iterable[str],
-            parameter_interpreters: Iterable[Callable],
+            parameter_interpreters: Iterable[Callable[[Iterator], Iterable]],
             parameter_descriptors: Iterable[str], 
-            callback: Callable
-        ):
+            callback: Callable[..., None]
+        ) -> None:
             self.__init__(
                 key, 
                 help_text, 
                 shortcuts,
-                Command.Parameter(parameter_interpreters, parameter_descriptors),
+                self.__class__.Parameter(parameter_interpreters, parameter_descriptors),
                 callback
             )
 
@@ -548,31 +558,29 @@ class Command:
 
         @property
         def shortcuts_str(self):
-            return ['-' + sc for sc in self._shortcuts \
-                if len(sc) == 1 else '--' + sc]
+            return ['-' + sc if len(sc) == 1 else '--' + sc \
+                for sc in self._shortcuts]
 
-        def parse(self, args):
+        def parse(self, args: Iterator[str]):
             k = 0
             output = []
 
             for itp in self._parameters.interpreters:
-                _out, k = itp(args[k:])
+                _out = itp(args)
                 output.append(_out)
 
-            return _out, k
-
+            return _out
 
     class Parameter:
-
         # Add support for multiple parameter options
 
         def __init__(
             self, 
-            parameter_interpreters: Iterable[Callable],
+            parameter_interpreters: Iterable[Callable[[Iterator], Iterable]],
             parameter_descriptors: Iterable[str]
-        ):
-            assert len(parameter_interpreters) == \
-                len(parameter_descriptors)
+        ) -> None:
+            assert len(parameter_interpreters) == len(parameter_descriptors), \
+                'There must be the same number of parameter interpreters as descriptors.'
             self._para_ints = [parameter_interpreters]
             self._para_descs = [parameter_descriptors]
 
@@ -588,36 +596,62 @@ class Command:
 
 
 class ArgumentParser(Command):
-
     def __init__(
         self, 
-        program_name: str, 
-        help_text: Optional[str], 
-        callback: Callable, 
+        program_name: str,
+        version: str,
+        callback: Callable[..., None], 
+        console: Optional[Console] = None,
+        help_text: Optional[str] = None,
         style: StyledOutput = None,
         std_help: bool = True
-    ):
-        super().__init__(program_name, help_text, \
-            None, None, None, None, callback)
-        atype_or_none(style, StyledOutput)
-
-
+    ) -> None:
+        super().__init__(
+            names=[program_name],
+            arg_parser=self,
+            help_text=help_text,
+            usage=program_name,
+            commands=None,
+            parameters=None,
+            options=None,
+            callback=callback,
+            std_help=std_help
+        )
+        self.program_name = program_name
+        self.version = version
+        self.console = console if console is not None else Console()
+        assert_type(style, StyledOutput, name='style', optional=True)
         self.style = style if style is not None else StyledOutput()
-
         self._std_help = std_help
-
+        self._arg_parser = self
         if std_help:
             self.__help_option__()
 
-    def build(self):
-        pass
+    def add_version_option(
+        self,
+        text: Optional[str] = None, 
+        index: Optional[int] = 1
+    ) -> None:
+        assert_type(text, str, name='text', optional=True)
+        assert_type(index, int, name='index', optional=True)
 
-    def parse(start_index=1):
+        self.add_option(
+            key = 'version',
+            help_text = 'Display the program\'s version',
+            shortcuts = ('V', 'version'),
+            parameters = (),
+            callback = lambda *args, **kwargs: self.console.print(
+                text.format(
+                    name = self.program_name, 
+                    version = self.version
+                )
+            ),
+            index = index
+        )
+
+    def parse(start_index: int = 1) -> None:
         args = argv[start_index:]
 
-        # First, we check whether the next input is a valid command
-
-
-    
+        super().parse(start_index=0, argument_list=args)
 
 
