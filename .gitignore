@@ -1,0 +1,10 @@
+
+
+# Ignore pycache
+fastui/__pycache__/
+fastui/terminal/__pycache__/
+fastui/tests/__pycache__/
+
+
+# Ignore templates folder for now
+templates/
